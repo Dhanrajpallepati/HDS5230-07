@@ -1,0 +1,142 @@
+---
+title: "Week 6 Assignment"
+author: "Dhanraj Pallepati"
+date: "2025-03-02"
+output: html_document
+---
+
+```{r}
+library(data.table)
+library(geosphere)
+library(GA)
+library(purrr)
+library(sf)
+
+## Load the population data
+pop.data <- data.table::fread("Mo_pop_Sim.csv")
+str(pop.data)
+frac <- 0.0001
+small.data <- pop.data[sample(1:nrow(pop.data),
+                               size = round(nrow(pop.data) * frac),
+                               replace = F), ## extract a sample of randomlychosen 1% rows
+                        ]  ## and choose all columns
+
+## Load the FQHC data
+data_path <- 'MO_2018_Federally_Qualified_Health_Center_Locations'
+fqhc.data <- data.table(as.data.frame(st_read(data_path,
+                     'MO_2018_Federally_Qualified_Health_Center_Locations')))
+
+fqhc_coords <- fqhc.data[, .(Longitude, Latitude)]
+pop_coords <- small.data[, .(long, lat)]
+```
+
+
+# APPROACH 1: Average closeness score
+```{r}
+calc_avg_distance <- function(fqhc_idx) {
+  fqhc_coord <- fqhc_coords[fqhc_idx, ]
+  distances <- distHaversine(matrix(c(fqhc_coord$Longitude, fqhc_coord$Latitude), ncol=2),
+                           matrix(c(pop_coords$long, pop_coords$lat), ncol=2))
+  return(mean(distances) / 1609.34)
+}
+
+avg_distances <- sapply(1:nrow(fqhc_coords), calc_avg_distance)
+fqhc.data$avg_distance <- avg_distances
+```
+
+
+# APPROACH 2: Population density within 30-mile radius
+```{r}
+count_pop_in_radius <- function(fqhc_idx, radius_miles = 30) {
+  fqhc_coord <- fqhc_coords[fqhc_idx, ]
+  distances <- distHaversine(matrix(c(fqhc_coord$Longitude, fqhc_coord$Latitude), ncol=2),
+                           matrix(c(pop_coords$long, pop_coords$lat), ncol=2))
+  count <- sum(distances <= (radius_miles * 1609.34))
+  return(count)
+}
+
+pop_counts <- sapply(1:nrow(fqhc_coords), count_pop_in_radius)
+fqhc.data$pop_in_30mi <- pop_counts
+fqhc.data$estimated_pop_in_30mi <- fqhc.data$pop_in_30mi * (1/frac)
+```
+
+```{r}
+# For approach 1: Lower average distance is better
+top_by_distance <- fqhc.data[order(avg_distance)][1:8, .(OBJECTID, Facility, City, avg_distance)]
+
+print(top_by_distance)
+```
+
+```{r}
+# For approach 2: Higher population count within 30 miles is better
+top_by_pop <- fqhc.data[order(-estimated_pop_in_30mi)][1:8, 
+                                              .(OBJECTID, Facility, City, estimated_pop_in_30mi)]
+print(top_by_pop)
+```
+
+
+
+```{r}
+# Create a combined score (normalized rank-based)
+fqhc.data$dist_rank <- rank(fqhc.data$avg_distance)
+fqhc.data$pop_rank <- rank(-fqhc.data$estimated_pop_in_30mi)
+
+fqhc.data$combined_score <- (fqhc.data$dist_rank + fqhc.data$pop_rank) / (2 * nrow(fqhc.data))
+top_combined <- fqhc.data[order(combined_score)][1:8, 
+                                     .(OBJECTID, Facility, City, avg_distance, estimated_pop_in_30mi)]
+
+cat("\nTop 8 FQHCs by Combined Score:\n")
+print(top_combined)
+```
+
+```{r}
+fitness_function <- function(indices) {
+  selected_fqhc <- fqhc_coords[indices, ]
+  total_pop <- 0
+  
+  for (i in 1:nrow(selected_fqhc)) {
+    fqhc_coord <- selected_fqhc[i, ]
+    distances <- distHaversine(matrix(c(fqhc_coord$Longitude, fqhc_coord$Latitude), ncol=2),
+                               matrix(c(pop_coords$long, pop_coords$lat), ncol=2))
+    total_pop <- total_pop + sum(distances <= (30 * 1609.34))
+  }
+  
+  return(total_pop)
+}
+
+# Define GA parameters
+num_fqhcs <- nrow(fqhc_coords)
+n_select <- 8
+
+ga_result <- ga(
+  type = "permutation", 
+  fitness = function(indices) fitness_function(indices),
+  lower = 1, upper = num_fqhcs,
+  popSize = 50, maxiter = 10, run = 10,
+  pmutation = 0.2, 
+  crossover = gaperm_oxCrossover,  # Corrected Crossover Function
+  elitism = 2
+)
+
+# Extract best solution
+best_indices <- ga_result@solution[1, ]
+best_fqhc <- fqhc.data[best_indices, .(OBJECTID, Facility, City, estimated_pop_in_30mi)]
+
+# Print the best locations
+print(best_fqhc)
+```
+
+
+
+
+
+
+The population coverage approach (residents within 30 miles) will be my leading fitness function to select FQHC sites for mental health service delivery. The metric should reach its highest point to guarantee maximum coverage of people by the chosen facilities.
+
+Maximizing the number of available mental health patients remains the main reason for adopting this strategic selection method. Limited resources will reach the most number of people when FQHCs with denser residential populations reside within their designated service areas. The strategic choice supports public health functions that maximize health service reach to diverse populations while minimizing inequalities.
+
+A few central assumptions exist within this method. The analysis makes the assumption that thirty miles constitutes suitable distance for mental health service access. The model presupposes that the need for mental health treatment exists at the same level within all populations whereas demographics should be ignored. This method presupposes that all healthcare facilities which have applied as FQHC additions have equivalent abilities to support new mental health services. The model takes service capacity to be uniform across all sites while primary focusing on patient count as its main variable of concern.
+
+The fitness evaluation consists of counting all inhabitants who reside within a distance of 30 miles from each FQHC site. The completion of this calculation depends on the population points which have Haversine distances between FQHC coordinates and residential coordinates and less than or equal to 30 miles. The obtained count would be adjusted through sampling fraction calculations to derive an estimate for determining actual demographic coverage. When choosing location points the main goal would be to achieve the highest possible value for population coverage.
+
+From societal and monetary standpoints the goal to reach the broadest population coverage proves sound. This approach will allocate scarce mental health service funds effectively to the areas that provide the highest number of patients access thereby maximizing reductions in untreated conditions statistics. A higher population density brings financial advantages for sustained mental health service delivery because it permits increased patient use of medical facilities and enhances operational efficiency.
