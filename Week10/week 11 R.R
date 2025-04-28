@@ -1,0 +1,170 @@
+library(mlbench)
+library(purrr)
+
+data("PimaIndiansDiabetes2")
+ds <- as.data.frame(na.omit(PimaIndiansDiabetes2))
+## fit a logistic regression model to obtain a parametric equation
+logmodel <- glm(diabetes ~ .,
+                data = ds,
+                family = "binomial")
+summary(logmodel)
+
+cfs <- coefficients(logmodel) ## extract the coefficients
+prednames <- variable.names(ds)[-9] ## fetch the names of predictors in a vector
+prednames
+
+sz <- 100000000 ## to be used in sampling
+##sample(ds$pregnant, size = sz, replace = T)
+
+dfdata <- map_dfc(prednames,
+                  function(nm){ ## function to create a sample-with-replacement for each pred.
+                    eval(parse(text = paste0("sample(ds$",nm,
+                                             ", size = sz, replace = T)")))
+                  }) ## map the sample-generator on to the vector of predictors
+## and combine them into a dataframe
+
+names(dfdata) <- prednames
+dfdata
+
+class(cfs[2:length(cfs)])
+
+length(cfs)
+length(prednames)
+## Next, compute the logit values
+pvec <- map((1:8),
+            function(pnum){
+              cfs[pnum+1] * eval(parse(text = paste0("dfdata$",
+                                                     prednames[pnum])))
+            }) %>% ## create beta[i] * x[i]
+  reduce(`+`) + ## sum(beta[i] * x[i])
+  cfs[1] ## add the intercept
+
+## exponentiate the logit to obtain probability values of thee outcome variable
+dfdata$outcome <- ifelse(1/(1 + exp(-(pvec))) > 0.5,
+                         1, 0)
+
+
+##XGBoost Direct:
+library(xgboost)
+library(dplyr)
+
+set.seed(123)
+
+# Sizes to try
+sizes <- c(100, 1000, 10000, 100000, 1000000, 10000000)
+
+# Create a data frame to store results
+results <- data.frame(
+  DatasetSize = integer(),
+  Accuracy = numeric(),
+  TimeTaken = numeric()
+)
+
+# Loop over each size
+for (sz in sizes) {
+  
+  cat("\nRunning for size:", sz, "\n")
+  
+  # Sample sz rows
+  idx <- sample(1:nrow(dfdata), sz)
+  dsmall <- dfdata[idx, ]
+  
+  # Prepare matrices for XGBoost
+  dtrain <- xgb.DMatrix(data = as.matrix(dsmall[, -ncol(dsmall)]), label = dsmall$outcome)
+  
+  # Simple cross-validation
+  start_time <- Sys.time()
+  model <- xgboost(data = dtrain,
+                   objective = "binary:logistic",
+                   nrounds = 50,
+                   max_depth = 3,
+                   verbose = 0)
+  end_time <- Sys.time()
+  
+  # Predict on training data (since no separate test set)
+  preds <- predict(model, as.matrix(dsmall[, -ncol(dsmall)]))
+  preds_class <- ifelse(preds > 0.5, 1, 0)
+  
+  # Accuracy
+  acc <- mean(preds_class == dsmall$outcome)
+  
+  # Time taken
+  time_taken <- as.numeric(difftime(end_time, start_time, units = "secs"))
+  
+  # Save the results
+  results <- rbind(results, data.frame(
+    DatasetSize = sz,
+    Accuracy = acc,
+    TimeTaken = time_taken
+  ))
+}
+
+results
+
+
+##XGBoost Caret:
+library(caret)
+library(xgboost)
+library(dplyr)
+
+set.seed(123)
+
+# Sizes to try
+sizes <- c(100, 1000, 10000, 100000, 1000000, 10000000)
+
+# Create a data frame to store results
+results_caret <- data.frame(
+  DatasetSize = integer(),
+  Accuracy = numeric(),
+  TimeTaken = numeric()
+)
+
+# Set up 5-fold cross-validation
+train_control <- trainControl(method = "cv", number = 5)
+
+# Loop over each size
+for (sz in sizes) {
+  
+  cat("\nRunning for size:", sz, "\n")
+  
+  # Sample sz rows
+  idx <- sample(1:nrow(dfdata), sz)
+  dsmall <- dfdata[idx, ]
+  
+  # Prepare predictors and outcome
+  x <- dsmall[, -ncol(dsmall)]
+  y <- as.factor(dsmall$outcome)
+  
+  # Start timing
+  start_time <- Sys.time()
+  
+  # Train XGBoost using caret
+  model <- train(x = x, 
+                 y = y,
+                 method = "xgbTree",
+                 trControl = train_control,
+                 tuneLength = 3,
+                 verbose = FALSE)
+  
+  # End timing
+  end_time <- Sys.time()
+  
+  # Predict on training set
+  preds <- predict(model, x)
+  
+  # Accuracy
+  acc <- mean(preds == y)
+  
+  # Time taken
+  time_taken <- as.numeric(difftime(end_time, start_time, units = "secs"))
+  
+  # Save results
+  results_caret <- rbind(results_caret, data.frame(
+    DatasetSize = sz,
+    Accuracy = acc,
+    TimeTaken = time_taken
+  ))
+}
+
+results_caret
+
