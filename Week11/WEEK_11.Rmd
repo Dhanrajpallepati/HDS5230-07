@@ -1,0 +1,234 @@
+---
+title: "week_11"
+author: "Dhanraj"
+date: "2025-04-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
+
+
+
+
+```{r}
+required_packages <- c("xgboost", "caret", "data.table", "tictoc", "mlbench", "knitr")
+new_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
+if (length(new_packages)) install.packages(new_packages)
+
+```
+
+```{r}
+# Load libraries
+library(xgboost)
+library(caret)
+library(data.table)
+library(tictoc)
+library(mlbench)
+library(knitr)
+```
+
+# Step 1: Generate Dataset
+```{r}
+# Function to generate a bootstrapped sample from the PimaIndiansDiabetes2 dataset
+generate_dataset <- function(size) {
+  # Load the PimaIndiansDiabetes2 dataset
+  data(PimaIndiansDiabetes2, package = "mlbench")
+  
+  # Ensure the dataset is loaded and not empty
+  if (!exists("PimaIndiansDiabetes2")) {
+    stop("PimaIndiansDiabetes2 dataset not found. Ensure mlbench package is installed.")
+  }
+  
+  # Remove any rows with missing values
+  df <- na.omit(PimaIndiansDiabetes2)
+  
+  # Check if the dataset is not empty after removing NAs
+  if (nrow(df) == 0) {
+    stop("Dataset is empty after removing missing values.")
+  }
+  
+  # Set seed for reproducibility
+  set.seed(123)
+  
+  # Sample with replacement to create a dataset of the desired size
+  df_sample <- df[sample(1:nrow(df), size = size, replace = TRUE), ]
+  
+  # Convert the 'diabetes' column to a binary outcome (1 for "pos", 0 for "neg")
+  df_sample$outcome <- ifelse(df_sample$diabetes == "pos", 1, 0)
+  
+  # Remove the original 'diabetes' column
+  df_sample <- df_sample[, -which(names(df_sample) == "diabetes")]
+  
+  # Return the bootstrapped dataset
+  return(df_sample)
+}
+```
+
+# Step 2: Define XGBoost Model Functions
+
+```{r}
+# Function to train and evaluate XGBoost directly using xgboost::xgb.cv()
+run_xgboost_direct <- function(size) {
+  # Generate a bootstrapped dataset of the specified size
+  df <- generate_dataset(size)
+  
+  # Separate features (all columns except the last) and outcome (last column)
+  X <- as.matrix(df[, -ncol(df)])      # Feature matrix
+  y <- df$outcome                     # Outcome vector (binary: 0/1)
+  
+  # Create an XGBoost DMatrix object for efficient computation
+  dtrain <- xgb.DMatrix(data = X, label = y)
+  
+  # Define XGBoost parameters for binary classification
+  params <- list(
+    objective = "binary:logistic",     # Logistic regression for binary outcome
+    max_depth = 2,                     # Maximum tree depth
+    eta = 1                            # Learning rate
+  )
+  
+  # Start timing the model training and evaluation
+  tic()
+  
+  # Perform 5-fold cross-validation with 10 boosting rounds
+  model <- xgb.cv(
+    params = params,
+    data = dtrain,
+    nfold = 5,
+    nrounds = 10,
+    metrics = "error",                 # Use classification error as the evaluation metric
+    verbose = 0                        # Suppress output
+  )
+  
+  # Stop timing and calculate elapsed time
+  time_taken <- toc(quiet = TRUE)
+  
+  # Compute accuracy: 1 - minimum test error mean across all rounds
+  accuracy <- 1 - min(model$evaluation_log$test_error_mean)
+  
+  # Return both accuracy and time taken as a list
+  return(list(
+    accuracy = accuracy,
+    time = time_taken$toc - time_taken$tic
+  ))
+}
+```
+
+```{r}
+# Function to train and evaluate XGBoost using the caret package with 5-fold cross-validation
+run_xgboost_caret <- function(size) {
+  # Generate a bootstrapped dataset of the specified size
+  df <- generate_dataset(size)
+  
+  # Set up 5-fold cross-validation control for caret
+  control <- trainControl(
+    method = "cv",    # Use cross-validation
+    number = 5        # Number of folds
+  )
+  
+  # Start timing the model training and evaluation
+  tic()
+  
+  # Train the XGBoost model using caret's train() function
+  # outcome ~ . means predict 'outcome' using all other variables
+  model <- train(
+    outcome ~ .,           # Formula: outcome as a function of all predictors
+    data = df,             # Training data
+    method = "xgbTree",    # Use XGBoost (tree-based)
+    trControl = control,   # Cross-validation settings
+    verbose = FALSE        # Suppress training output
+  )
+  
+  # Stop timing and calculate elapsed time
+  time_taken <- toc(quiet = TRUE)
+  
+  # Extract the highest accuracy achieved across all tuning parameter combinations
+  accuracy <- max(model$results$Accuracy)
+  
+  # Return both accuracy and time taken as a list
+  return(list(
+    accuracy = accuracy,
+    time = time_taken$toc - time_taken$tic
+  ))
+}
+
+```
+# Step 3: Run for All Dataset Sizes
+```{r}
+# Define dataset sizes to benchmark (adjust based on available memory)
+# Note: 10 million (1e7) may require significant computational resources
+sizes <- c(100, 1000, 10000, 100000, 1000000)
+
+# Initialize empty dataframe to store benchmark results with columns:
+# - Method: Implementation method used
+# - Size: Dataset size
+# - Accuracy: Model accuracy (percentage)
+# - Time: Execution time in seconds
+results <- data.frame(
+  Method = character(), 
+  Size = integer(), 
+  Accuracy = numeric(), 
+  Time = numeric()
+)
+
+# Main benchmarking loop
+for (size in sizes) {
+  # Print progress message to console
+  cat("\nProcessing dataset size:", size, "\n")
+  
+  # Benchmark direct XGBoost implementation with error handling
+  try({
+    res_direct <- run_xgboost_direct(size)  # Execute direct XGBoost
+    results <- rbind(results, data.frame(
+      Method = "R xgboost() direct",
+      Size = size,
+      Accuracy = round(res_direct$accuracy * 100, 2),  # Convert to percentage
+      Time = round(res_direct$time, 2)                 # Round to 2 decimals
+    ))
+  }, silent = TRUE)  # Suppress error messages to keep output clean
+  
+  # Benchmark caret implementation with error handling
+  try({
+    res_caret <- run_xgboost_caret(size)  # Execute caret XGBoost
+    results <- rbind(results, data.frame(
+      Method = "R caret::xgbTree",
+      Size = size,
+      Accuracy = round(res_caret$accuracy * 100, 2),
+      Time = round(res_caret$time, 2)
+    ))
+  }, silent = TRUE)
+}
+
+```
+# Step 4: View and Save Results
+```{r}
+print(results)
+```
+
+# Save the results as a CSV
+```{r}
+write.csv(results, "xgboost_results_R.csv", row.names = FALSE)
+```
